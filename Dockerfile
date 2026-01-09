@@ -1,28 +1,24 @@
 FROM runpod/worker-comfyui:5.5.1-base
 
-SHELL ["/bin/bash", "-lc"]
 WORKDIR /workspace
-
-# 复制你的仓库
 COPY . /workspace
 
-# 基本环境
-RUN chmod +x /workspace/start.sh && \
-    /opt/venv/bin/python -m pip install --no-cache-dir -U pip
+# 基本工具（有些 base 里有，但装上更稳）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
-# 1) 安装 custom_nodes（按 locks/custom_nodes.lock.txt 精确 pin）
-RUN /opt/venv/bin/python /workspace/tools/install_custom_nodes.py \
-      /workspace/locks/custom_nodes.lock.txt \
-      /comfyui/custom_nodes
+# 脚本可执行
+RUN chmod +x /workspace/start.sh
 
-# 2) 安装每个 custom node 自带 requirements（尽量最小化依赖变更）
-RUN set -e; \
-    for req in /comfyui/custom_nodes/*/requirements.txt; do \
-      if [ -f "$req" ]; then \
-        echo "[pip] install $req"; \
-        /opt/venv/bin/python -m pip install --no-cache-dir -r "$req" || true; \
-      fi; \
-    done
+# 固定 pip 版本（可选）
+RUN /opt/venv/bin/python -m pip install --no-cache-dir -U pip
 
-# 入口
-CMD ["bash", "/workspace/start.sh"]
+# 1) 按 lock 安装 custom_nodes（repo + commit）
+RUN /opt/venv/bin/python /workspace/tools/install_custom_nodes.py /workspace/locks/custom_nodes.lock.txt /comfyui/custom_nodes
+
+# 2) 安装几个常见节点的 requirements（按需）
+RUN set -eux; \
+    PY=/opt/venv/bin/python; \
+    if [ -f /comfyui/custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt ]; then $PY -m pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt; fi; \
+    if [ -f /comfyui/custom_nodes/ComfyUI-Crystools/requirements.txt ]; then $PY -m pip install --no-cache-dir -r /comfyui/custom_nodes/Com
