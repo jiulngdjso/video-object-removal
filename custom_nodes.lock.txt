@@ -1,0 +1,8 @@
+https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git|3234937ff5f3ca19068aaba5042771514de2429d
+https://github.com/LeonQ8/ComfyUI-Dynamic-Lora-Scheduler.git|b5a796bb8c6995129283c3e216aae7fc5e889f2a
+https://github.com/chflame163/ComfyUI_LayerStyle.git|0d88b177d4ebefc3e7b753774312e91d34ac6501
+https://github.com/chflame163/ComfyUI_LayerStyle_Advance.git|42f9dbae8453933178c310f7bcaa2b931e11c3bf
+https://github.com/crystian/ComfyUI-Crystools.git|2f18256c5b5063937106f29a8e0a7db3ae3869b7
+https://github.com/kijai/ComfyUI-KJNodes.git|18dbd77ca7a26ed4e5d6a7d97127e832fae15c6f
+https://github.com/kijai/ComfyUI-WanVideoWrapper.git|855d103ee6fb61d8e24452f56ffcd629591cd7e1
+https://github.com/yolain/ComfyUI-Easy-Use.git|9f42ead9dba1a3ccaf74dfb78440f5b63318bdd9
