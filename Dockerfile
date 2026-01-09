@@ -1,24 +1,37 @@
 FROM runpod/worker-comfyui:5.5.1-base
 
-WORKDIR /workspace
-COPY . /workspace
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg git ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
 
-# 基本工具（有些 base 里有，但装上更稳）
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+ENV COMFYUI_DIR=/comfyui
+ENV COMFYUI_PORT=8188
+ENV PYTHONUNBUFFERED=1
 
-# 脚本可执行
-RUN chmod +x /workspace/start.sh
+WORKDIR /app
 
-# 固定 pip 版本（可选）
-RUN /opt/venv/bin/python -m pip install --no-cache-dir -U pip
+# 1) Python 依赖（你导出的 requirements.lock.txt）
+COPY locks/requirements.lock.txt /tmp/requirements.lock.txt
+RUN /opt/venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.lock.txt
 
-# 1) 按 lock 安装 custom_nodes（repo + commit）
-RUN /opt/venv/bin/python /workspace/tools/install_custom_nodes.py /workspace/locks/custom_nodes.lock.txt /comfyui/custom_nodes
+# 2) 安装 custom_nodes（按 repo|commit 锁定）
+COPY locks/custom_nodes.lock.txt /tmp/custom_nodes.lock.txt
+COPY tools/install_custom_nodes.py /app/tools/install_custom_nodes.py
 
-# 2) 安装几个常见节点的 requirements（按需）
-RUN set -eux; \
-    PY=/opt/venv/bin/python; \
-    if [ -f /comfyui/custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt ]; then $PY -m pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt; fi; \
-    if [ -f /comfyui/custom_nodes/ComfyUI-Crystools/requirements.txt ]; then $PY -m pip install --no-cache-dir -r /comfyui/custom_nodes/Com
+# 可选：移除 Manager（避免 Manager 自动更新/污染）
+RUN rm -rf /comfyui/custom_nodes/ComfyUI-Manager \
+ && rm -rf /comfyui/user/default/ComfyUI-Manager || true
+
+RUN /opt/venv/bin/python /app/tools/install_custom_nodes.py \
+      --lock /tmp/custom_nodes.lock.txt \
+      --dst /comfyui/custom_nodes
+
+# 3) 复制工作流、patch、handler、start
+COPY workflows/workflow_api.json /app/workflows/workflow_api.json
+COPY patches /app/patches
+COPY handler.py /app/handler.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]
