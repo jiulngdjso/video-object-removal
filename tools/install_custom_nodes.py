@@ -18,16 +18,21 @@ import time
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
-def run(cmd: List[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    # Print command for visibility in docker build logs
+def run(cmd: List[str], cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess:
     print("+", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=check, text=True)
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        check=check,
+        text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
 
 
-def run_ok(cmd: List[str], cwd: Path | None = None) -> bool:
+def run_ok(cmd: List[str], cwd: Optional[Path] = None) -> bool:
     try:
         run(cmd, cwd=cwd, check=True)
         return True
@@ -41,7 +46,7 @@ def parse_lock(lock_path: Path) -> List[Tuple[str, str]]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        # allow "repo|sha" or "repo sha"
+
         if "|" in line:
             repo, sha = line.split("|", 1)
         else:
@@ -49,15 +54,17 @@ def parse_lock(lock_path: Path) -> List[Tuple[str, str]]:
             if len(parts) < 2:
                 raise ValueError(f"Bad lock line: {raw!r}")
             repo, sha = parts[0], parts[1]
+
         repo, sha = repo.strip(), sha.strip()
         if not repo or not sha:
             raise ValueError(f"Bad lock line: {raw!r}")
+        if "..." in sha:
+            raise ValueError(f"Lock sha contains '...': {raw!r}  (必须是完整 40 位 commit)")
         items.append((repo, sha))
     return items
 
 
 def repo_dir_name(repo_url: str) -> str:
-    # https://github.com/a/b.git -> b
     name = repo_url.rstrip("/").split("/")[-1]
     if name.endswith(".git"):
         name = name[:-4]
@@ -70,28 +77,36 @@ def ensure_git_exists() -> None:
 
 
 def safe_backup_non_git_dir(dst: Path) -> None:
-    # If folder exists but not a git repo (common when Manager leaves residue), move it away.
     if dst.exists() and dst.is_dir() and not (dst / ".git").exists():
         bk = dst.with_name(dst.name + f".bak.{int(time.time())}")
         print(f"[WARN] {dst} exists but not a git repo. Move to {bk}", flush=True)
         dst.rename(bk)
 
 
+def _ensure_remote(dst: Path, repo_url: str) -> None:
+    # 不要 remote remove/add（会把 partial clone 的配置弄丢）
+    # 用 set-url 最稳
+    if not run_ok(["git", "remote", "get-url", "origin"], cwd=dst):
+        run(["git", "remote", "add", "origin", repo_url], cwd=dst)
+    else:
+        run(["git", "remote", "set-url", "origin", repo_url], cwd=dst)
+
+
 def checkout_exact_commit(dst: Path, repo_url: str, sha: str, retries: int = 2) -> None:
     """
-    Strategy:
-      - if dir doesn't exist: clone (no checkout) then fetch commit and checkout
-      - if exists: set remote, fetch commit, checkout
-    Use shallow fetch by commit first; if fails, fallback to normal fetch.
+    Robust strategy:
+      1) clone (no special filter) if not exists
+      2) set-url origin (never remove/add)
+      3) try fetch exact commit with depth 1
+      4) checkout sha
+      5) if checkout fails due to missing objects -> unshallow/full fetch then checkout again
     """
-    # Make sure repo is initialized
     if not (dst / ".git").exists():
-        # clone as bare minimal
-        # --filter=blob:none reduces transfer size on GitHub
+        # 普通 clone，避免 partial clone/过滤导致缺对象
         ok = False
         for i in range(retries + 1):
             try:
-                run(["git", "clone", "--no-checkout", "--filter=blob:none", repo_url, str(dst)])
+                run(["git", "clone", "--no-checkout", repo_url, str(dst)])
                 ok = True
                 break
             except subprocess.CalledProcessError:
@@ -102,11 +117,9 @@ def checkout_exact_commit(dst: Path, repo_url: str, sha: str, retries: int = 2) 
         if not ok:
             raise RuntimeError(f"Failed to clone {repo_url}")
 
-    # Ensure remote origin correct
-    run_ok(["git", "remote", "remove", "origin"], cwd=dst)
-    run(["git", "remote", "add", "origin", repo_url], cwd=dst)
+    _ensure_remote(dst, repo_url)
 
-    # Try shallow fetch exact commit
+    # 先尝试：按 commit 浅 fetch
     fetched = False
     for i in range(retries + 1):
         if run_ok(["git", "fetch", "--depth", "1", "origin", sha], cwd=dst):
@@ -116,18 +129,21 @@ def checkout_exact_commit(dst: Path, repo_url: str, sha: str, retries: int = 2) 
             print(f"[WARN] shallow fetch commit failed, retry {i+1}/{retries} ...", flush=True)
             time.sleep(2)
 
-    # Fallback: fetch default refs if commit fetch didn't work
+    # 兜底：拉全 refs（更慢但稳）
     if not fetched:
         print("[WARN] fallback to full fetch (may be slower)...", flush=True)
-        # prune old refs
-        run_ok(["git", "fetch", "--all", "--prune"], cwd=dst)
-        fetched = True
+        run(["git", "fetch", "--all", "--prune"], cwd=dst)
 
-    # Checkout commit (detached HEAD)
-    # If the repo uses submodules, you'd add submodule update here, but most ComfyUI nodes don't.
-    run(["git", "checkout", "--force", sha], cwd=dst)
+    # checkout commit
+    try:
+        run(["git", "checkout", "--force", sha], cwd=dst)
+    except subprocess.CalledProcessError:
+        # 常见于：缺对象/历史不够 -> 直接 unshallow 或 deep fetch 再试
+        print("[WARN] checkout failed, try unshallow/deepen then checkout again...", flush=True)
+        if not run_ok(["git", "fetch", "--unshallow", "origin"], cwd=dst):
+            run_ok(["git", "fetch", "--depth", "100000", "origin"], cwd=dst)
+        run(["git", "checkout", "--force", sha], cwd=dst)
 
-    # Optional: show status
     run_ok(["git", "rev-parse", "HEAD"], cwd=dst)
 
 
@@ -152,7 +168,6 @@ def main() -> int:
         print("[WARN] lock file empty, nothing to do.", flush=True)
         return 0
 
-    # Controls
     retries = int(os.environ.get("GIT_RETRIES", "2"))
 
     for repo_url, sha in items:
@@ -169,12 +184,10 @@ def main() -> int:
             print(f"[OK] {name} pinned at {sha}", flush=True)
         except Exception as e:
             print(f"[FAIL] {name}: {e}", file=sys.stderr, flush=True)
-            # In serverless image build, failing early is usually better:
             return 1
 
-    # export a quick summary (optional)
     print("\n[INFO] Installed nodes:", flush=True)
-    for repo_url, sha in items:
+    for repo_url, _sha in items:
         name = repo_dir_name(repo_url)
         dst = target_dir / name
         if (dst / ".git").exists():
